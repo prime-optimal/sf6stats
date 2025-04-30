@@ -39,7 +39,7 @@ print_color() {
     printf '%b%s%b' "$color" "$*" "$RESET"
 }
 
-unset mode debug cacheDir yyyymm json  chara rank ranking easyRanking
+unset mode debug cacheDir yyyymm json  character rank ranking easyRanking input_type
 rank=master  rankList=(rookie iron bronze silver gold platinum diamond master)
 
 echo "Script starting..."
@@ -57,13 +57,16 @@ Show fighting stats of STREET FIGHTER 6.
 Reference: https://www.streetfighter.com/6/buckler/stats/dia
 
 Options:
-  -c, --chara Type-Chara (e.g. 'C-guile')
-      Specify control type 'C' or 'M', followed by '-' and name (lower case).
-      Use --rank without --chara to list all characters.
+  -c, --character Character (e.g. 'guile')
+      Specify the character name in lowercase.
+      Use --rank without --character to list all characters.
   -i, --interactive
-      Select rank and chara interactively (Ignore --chara and --rank).
+      Select rank and character interactively (Ignore --character and --rank).
   -r, --rank rookie|iron|bronze|silver|gold|platinum|diamond|master
       Default: master
+  -t, --type C|M
+      Show stats for specific control type (Classic or Modern, case-insensitive).
+      Default: Show consolidated stats for both types.
   --yyyymm YearMonth (since '202306')
       The stats are updated on the second Thursday of each month.
       Default: Latest stats
@@ -81,12 +84,18 @@ END
 error() { local s=$1; shift; echo -e "Error: $*" 1>&2; exit $s; }
 
 echo "Processing arguments..."
+# Store original arguments
+original_args=("$@")
+character_arg=""
+character_val=""
+
+# First pass: Process all arguments except --character
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -c|--chara)
-      [[ $# = 1 || $2 =~ ^- ]] && error 1 "$1: requires an argument"
-      [[ $2 =~ ^(C|M)-[a-z]+$ ]] || error 1 "$1: incorrect format: $2"
-      chara=$2
+    -c|--character)
+      # Store character argument for later processing
+      character_arg=$1
+      character_val=$2
       shift 2
       ;;
     -i|--interactive)
@@ -97,6 +106,17 @@ while [[ $# -gt 0 ]]; do
       [[ $# = 1 || $2 =~ ^- ]] && error 1 "$1: requires an argument"
       [[ $2 =~ ^(rookie|iron|bronze|silver|gold|platinum|diamond|master)$ ]] || error 1 "$1: no such rank: $2"
       rank=$2
+      shift 2
+      ;;
+    -t|--type)
+      [[ $# = 1 || $2 =~ ^- ]] && error 1 "$1: requires an argument"
+      [[ $2 =~ ^[CcMm]$ ]] || error 1 "$1: must be either C or M: $2"
+      # Convert to uppercase in a more compatible way
+      if [[ $2 == "c" || $2 == "C" ]]; then
+        input_type="C"
+      else
+        input_type="M"
+      fi
       shift 2
       ;;
     --rm-cache)
@@ -136,6 +156,14 @@ while [[ $# -gt 0 ]]; do
   esac
   echo "Processed argument: $1"
 done
+
+# Second pass: Process character argument if it exists
+if [[ -n $character_arg ]]; then
+  [[ -z $character_val || $character_val =~ ^- ]] && error 1 "$character_arg: requires an argument"
+  # Always require lowercase letters for character name
+  [[ $character_val =~ ^[a-z]+$ ]] || error 1 "$character_arg: incorrect format: $character_val (must be lowercase letters only)"
+  character=$character_val
+fi
 
 echo "Arguments processed"
 echo "Current yyyymm value: $yyyymm"
@@ -204,11 +232,25 @@ downloadJson() {
 }
 validateJson() {
   echo "In validateJson"
-  local masterHeader=$(jq ".diaData.ci.d_sort.\"8\".opponent_header" "$json")
+  # Choose between consolidated (c) or input-specific (ci) data
+  local data_path=".diaData"
+  if [[ -n $input_type ]]; then
+    data_path="$data_path.ci.d_sort.\"8\".opponent_header"
+  else
+    data_path="$data_path.c.d_sort.\"8\".opponent_header"
+  fi
+  
+  local masterHeader=$(jq "$data_path" "$json")
   local length=$(jq "length" <<<$masterHeader)
   [[ $length =~ ^[1-9][0-9]*$ ]] || error 20 "can not parse JSON: $json"
   echo "opponent_header.length: $length"
-  local every="map(has(\"input_type\"), has(\"tool_name\"), has(\"_dsort\")) | all"
+  
+  # Check for required fields based on data type
+  if [[ -n $input_type ]]; then
+    local every="map(has(\"input_type\"), has(\"tool_name\"), has(\"_dsort\")) | all"
+  else
+    local every="map(has(\"tool_name\"), has(\"_dsort\")) | all"
+  fi
   jq -e "$every" <<<$masterHeader >/dev/null || error 21 "can not parse JSON: $json"
 }
 
@@ -228,20 +270,29 @@ makeRanking() {
   local rank_idx
   rank_idx=$(rankIndex) || error 1 "Invalid rank: $rank"
   echo "Using rank index: $rank_idx"
-  local opponent_header=".diaData.ci.d_sort.\"$rank_idx\".opponent_header[]"
-  local data='.input_type + "-" + .tool_name + " " + (if (._dsort | type) == "number" then (._dsort*100 | tostring) else "null" end)'
-  echo "Running jq query: $opponent_header | $data"
-  local lines; lines=$(jq -r "$opponent_header | $data" "$json") ||
+  
+  # Choose between consolidated (c) or input-specific (ci) data
+  local data_path=".diaData"
+  if [[ -n $input_type ]]; then
+    data_path="$data_path.ci.d_sort.\"$rank_idx\".opponent_header[]"
+    local data='.input_type + "-" + .tool_name + " " + (if (._dsort | type) == "number" then (._dsort*10 | tostring) else "null" end)'
+  else
+    data_path="$data_path.c.d_sort.\"$rank_idx\".opponent_header[]"
+    local data='.tool_name + " " + (if (._dsort | type) == "number" then (._dsort*10 | tostring) else "null" end)'
+  fi
+  
+  echo "Running jq query: $data_path | $data"
+  local lines; lines=$(jq -r "$data_path | $data" "$json") ||
     error 25 "can not parse JSON: $json"
   echo "Jq query completed, processing lines"
   unset ranking
-  while IFS= read -r line; do # e.g. C-terry 54.51220338217697
+  while IFS= read -r line; do # e.g. terry 5.451220338217697 or C-terry 5.451220338217697
     if [[ $line =~ null$ ]]; then
       ranking[${#ranking[@]}]=$(printf '%-10s --' "${line%null}") # e.g. --yyyymm 202408
     else
-      local chara=${line% *}
+      local character=${line% *}
       local value=${line##* }
-      ranking[${#ranking[@]}]=$(printf '%-10s %.2f%%' "$chara" "$value")
+      ranking[${#ranking[@]}]=$(printf '%-10s %6.3f' "$character" "$value")
     fi
   done <<<"$lines"
   echo "Processed ${#ranking[@]} ranking entries"
@@ -255,7 +306,6 @@ showRanking() {
   
   # Print header
   print_color "$BOLD$CYAN" "[$rank] win rate ranking: ${yyyymm:0:4}-${yyyymm:4}"
-  print_color "$BOLD" "Select: chara"
   echo
   
   # Print rankings in columns
@@ -281,7 +331,7 @@ showRanking() {
           elif awk -v val="$value" 'BEGIN { exit !(val >= 5.2) }'; then
             print_color "$LIGHT_GREEN" "$value"
           elif awk -v val="$value" 'BEGIN { exit !(val >= 4.8) }'; then
-            printf '%s' "$value"  # Use default terminal color
+            print_color "$YELLOW" "$value"  # Use yellow for middle range
           elif awk -v val="$value" 'BEGIN { exit !(val >= 4.5) }'; then
             print_color "$LIGHT_RED" "$value"
           else
@@ -293,13 +343,25 @@ showRanking() {
     done
     echo
   done
-  print_color "$BOLD$YELLOW" "q) Quit"
+  # print_color "$BOLD$YELLOW" "q) Quit"
   echo
 }
 makeEasyRanking() {
-  local records=".diaData.ci.d_sort.\"$(rankIndex)\".records[]"
-  local select="select(.tool_name==\"${chara:2}\" and .input_type==\"${chara:0:1}\") | .values"
-  local val; val=$(jq "$records | $select" "$json") || error 26 "can not parse JSON: $json"
+  # Choose between consolidated (c) or input-specific (ci) data
+  local data_path=".diaData"
+  local char_name=$character
+  local char_type=$input_type
+  
+  if [[ -n $input_type ]]; then
+    data_path="$data_path.ci.d_sort.\"$(rankIndex)\".records[]"
+    local select="select(.tool_name==\"$char_name\" and .input_type==\"$char_type\") | .values"
+  else
+    data_path="$data_path.c.d_sort.\"$(rankIndex)\".records[]"
+    local select="select(.tool_name==\"$char_name\") | .values"
+  fi
+  
+  echo "Running jq query: $data_path | $select"
+  local val; val=$(jq "$data_path | $select" "$json") || error 26 "can not parse JSON: $json"
   [[ $(jq 'length' <<<$val) = ${#ranking[@]} ]] || error 27 "invalid JSON: $json"
   
   # Process the values and create arrays for sorting and display
@@ -345,7 +407,7 @@ makeEasyRanking() {
   local total=${#sorted_display[@]}
   local rows=$(( (total + cols - 1) / cols ))  # Ceiling division
   
-  print_color "$BOLD$CYAN" "[$rank] $chara's win rate (1st column):"
+  print_color "$BOLD$CYAN" "[$rank] $character's win rate (1st column):"
   echo
   
   for ((row=0; row<rows; row++)); do
@@ -370,7 +432,7 @@ makeEasyRanking() {
           elif awk -v val="$value" 'BEGIN { exit !(val >= 5.2) }'; then
             print_color "$LIGHT_GREEN" "$value"
           elif awk -v val="$value" 'BEGIN { exit !(val >= 4.8) }'; then
-            printf '%s' "$value"  # Use default terminal color
+            print_color "$YELLOW" "$value"  # Use yellow for middle range
           elif awk -v val="$value" 'BEGIN { exit !(val >= 4.5) }'; then
             print_color "$LIGHT_RED" "$value"
           else
@@ -383,7 +445,27 @@ makeEasyRanking() {
     echo
   done
 }
-charaExists() { for e in "${ranking[@]%% *}"; do [[ $e =~ $chara ]] && return 0; done; return 1; }
+charaExists() {
+  local char_name=$character
+  local char_type=$input_type
+  
+  if [[ -n $input_type ]]; then
+    # For input-specific mode, check for match with type prefix
+    for e in "${ranking[@]%% *}"; do 
+      if [[ $e =~ ^$char_type-$char_name$ ]]; then
+        return 0
+      fi
+    done
+  else
+    # For consolidated mode, check for match with character name
+    for e in "${ranking[@]%% *}"; do 
+      if [[ $e == "$char_name" ]]; then
+        return 0
+      fi
+    done
+  fi
+  return 1
+}
 
 selectRank() {
   print_color "$BOLD$CYAN" "Select: rank"
@@ -396,9 +478,9 @@ selectRank() {
     fi
   done
   makeRanking
-  selectChara
+  selectCharacter
 }
-selectChara() {
+selectCharacter() {
   showRanking
   local choices=("${ranking[@]}" "Select: rank" "Quit")
   local total=${#ranking[@]}
@@ -411,7 +493,7 @@ selectChara() {
     case "$choice" in
       [1-9]|[1-9][0-9])
         if (( choice <= total )); then
-          chara=${ranking[choice-1]%% *}
+          character=${ranking[choice-1]%% *}
           makeEasyRanking
           echo
           selectMenu
@@ -431,13 +513,13 @@ selectChara() {
   done
 }
 selectMenu() {
-  select e in 'Select: chara' 'Select: rank' 'Quit'; do
+  select e in 'Select: character' 'Select: rank' 'Quit'; do
     if [[ $e == "Quit" ]]; then
       exit 0
     elif [[ $e == 'Select: rank' ]]; then
       selectRank
     else
-      selectChara
+      selectCharacter
     fi
     break
   done
@@ -479,8 +561,8 @@ if [[ $mode = validate ]]; then exit; fi
 #
 if [[ $mode = interactive ]]; then
   selectRank
-elif [[ $chara ]]; then
-  makeRanking; charaExists || error 50 "--chara: no such chara: $chara"
+elif [[ $character ]]; then
+  makeRanking; charaExists || error 50 "--character: no such character: $character"
   makeEasyRanking; echo
 else
   makeRanking; showRanking
