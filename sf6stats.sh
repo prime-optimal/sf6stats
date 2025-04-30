@@ -275,7 +275,7 @@ makeRanking() {
   local data_path=".diaData"
   if [[ -n $input_type ]]; then
     data_path="$data_path.ci.d_sort.\"$rank_idx\".opponent_header[]"
-    local data='.input_type + "-" + .tool_name + " " + (if (._dsort | type) == "number" then (._dsort*10 | tostring) else "null" end)'
+    local data='.input_type + " " + .tool_name + " " + (if (._dsort | type) == "number" then (._dsort*10 | tostring) else "null" end)'
   else
     data_path="$data_path.c.d_sort.\"$rank_idx\".opponent_header[]"
     local data='.tool_name + " " + (if (._dsort | type) == "number" then (._dsort*10 | tostring) else "null" end)'
@@ -286,13 +286,32 @@ makeRanking() {
     error 25 "can not parse JSON: $json"
   echo "Jq query completed, processing lines"
   unset ranking
-  while IFS= read -r line; do # e.g. terry 5.451220338217697 or C-terry 5.451220338217697
+  while IFS= read -r line; do
     if [[ $line =~ null$ ]]; then
-      ranking[${#ranking[@]}]=$(printf '%-10s --' "${line%null}") # e.g. --yyyymm 202408
+      if [[ -n $input_type ]]; then
+        # Format: "C deejay --"
+        local type=${line%% *}
+        local char=${line#* }
+        char=${char%% *}
+        ranking[${#ranking[@]}]=$(printf '%-10s -- %1s' "$char" "$type")
+      else
+        # Format: "deejay --"
+        ranking[${#ranking[@]}]=$(printf '%-10s --' "${line%null}")
+      fi
     else
-      local character=${line% *}
-      local value=${line##* }
-      ranking[${#ranking[@]}]=$(printf '%-10s %6.3f' "$character" "$value")
+      if [[ -n $input_type ]]; then
+        # Format: "C deejay 5.123 C"
+        local type=${line%% *}
+        local rest=${line#* }
+        local char=${rest%% *}
+        local value=${rest##* }
+        ranking[${#ranking[@]}]=$(printf '%-10s %6.3f %1s' "$char" "$value" "$type")
+      else
+        # Format: "deejay 5.123"
+        local character=${line%% *}
+        local value=${line##* }
+        ranking[${#ranking[@]}]=$(printf '%-10s %6.3f' "$character" "$value")
+      fi
     fi
   done <<<"$lines"
   echo "Processed ${#ranking[@]} ranking entries"
@@ -300,7 +319,13 @@ makeRanking() {
 showRanking() {
   echo "In showRanking"
   local i=1
-  local cols=3  # Number of columns to display
+  # Display in 4 columns when input type is specified, otherwise 3 columns
+  local cols
+  if [[ -n $input_type ]]; then
+    cols=4
+  else
+    cols=3
+  fi
   local total=${#ranking[@]}
   local rows=$(( (total + cols - 1) / cols ))  # Ceiling division
   
@@ -315,27 +340,55 @@ showRanking() {
       if (( idx < total )); then
         local entry="${ranking[idx]}"
         local char=${entry%% *}
-        local value=${entry#* }
+        local rest=${entry#* }
         
         printf '%2d) ' $((idx+1))
         print_color "$BOLD" "$char"  # Removed WHITE color
         printf ' '
         
-        # Handle self-matches without color
-        if [[ $value == "--" ]]; then
-          printf '%s' "$value"
-        else
-          # Use awk for floating-point comparison with multiple thresholds
-          if awk -v val="$value" 'BEGIN { exit !(val >= 5.5) }'; then
-            print_color "$GREEN" "$value"
-          elif awk -v val="$value" 'BEGIN { exit !(val >= 5.2) }'; then
-            print_color "$LIGHT_GREEN" "$value"
-          elif awk -v val="$value" 'BEGIN { exit !(val >= 4.8) }'; then
-            print_color "$YELLOW" "$value"  # Use yellow for middle range
-          elif awk -v val="$value" 'BEGIN { exit !(val >= 4.5) }'; then
-            print_color "$LIGHT_RED" "$value"
+        if [[ -n $input_type ]]; then
+          # Format with input type: "char 5.123 C" or "char -- C"
+          local value=${rest%% *}
+          local type=${rest##* }
+          
+          # Handle self-matches without color
+          if [[ $value == "--" ]]; then
+            printf '%s %s' "$value" "$type"
           else
-            print_color "$RED" "$value"
+            # Use awk for floating-point comparison with multiple thresholds
+            if awk -v val="$value" 'BEGIN { exit !(val >= 5.5) }'; then
+              print_color "$GREEN" "$value"
+            elif awk -v val="$value" 'BEGIN { exit !(val >= 5.2) }'; then
+              print_color "$LIGHT_GREEN" "$value"
+            elif awk -v val="$value" 'BEGIN { exit !(val >= 4.8) }'; then
+              print_color "$YELLOW" "$value"  # Use yellow for middle range
+            elif awk -v val="$value" 'BEGIN { exit !(val >= 4.5) }'; then
+              print_color "$LIGHT_RED" "$value"
+            else
+              print_color "$RED" "$value"
+            fi
+            printf ' %s' "$type"
+          fi
+        else
+          # Format without input type: "char 5.123" or "char --"
+          local value=$rest
+          
+          # Handle self-matches without color
+          if [[ $value == "--" ]]; then
+            printf '%s' "$value"
+          else
+            # Use awk for floating-point comparison with multiple thresholds
+            if awk -v val="$value" 'BEGIN { exit !(val >= 5.5) }'; then
+              print_color "$GREEN" "$value"
+            elif awk -v val="$value" 'BEGIN { exit !(val >= 5.2) }'; then
+              print_color "$LIGHT_GREEN" "$value"
+            elif awk -v val="$value" 'BEGIN { exit !(val >= 4.8) }'; then
+              print_color "$YELLOW" "$value"  # Use yellow for middle range
+            elif awk -v val="$value" 'BEGIN { exit !(val >= 4.5) }'; then
+              print_color "$LIGHT_RED" "$value"
+            else
+              print_color "$RED" "$value"
+            fi
           fi
         fi
         printf '  '
@@ -343,7 +396,6 @@ showRanking() {
     done
     echo
   done
-  # print_color "$BOLD$YELLOW" "q) Quit"
   echo
 }
 makeEasyRanking() {
@@ -368,26 +420,57 @@ makeEasyRanking() {
   local sort_keys=()
   local display_values=()
   local i=1
+  
+  # Debug output (commented out)
+  # echo "DEBUG: Processing values for makeEasyRanking"
+  # echo "DEBUG: Character: $character, Input Type: $input_type"
+  # echo "DEBUG: JSON value: $val"
+  
   while IFS= read -r line; do
     # Remove quotes and handle special cases
     line=${line//\"/}
     local char=${ranking[i-1]%% *}
+    local type=""
+    
+    # Extract type if available
+    if [[ -n $input_type ]]; then
+      if [[ ${ranking[i-1]} =~ [[:space:]][CM]$ ]]; then
+        type=${ranking[i-1]##* }
+      fi
+    fi
+    
+    # echo "DEBUG: Processing line: $line for char: $char, type: $type"
+    
     if [[ $line == "-" || $line == "-.---" ]]; then
       sort_keys+=("-1")  # Place self-matches at the end
-      display_values+=("$(printf '%-10s --' "$char")")
+      if [[ -n $input_type ]]; then
+        display_values+=("$(printf '%-10s -- %1s' "$char" "$type")")
+      else
+        display_values+=("$(printf '%-10s --' "$char")")
+      fi
     else
       # Format the value with three decimal places
       if [[ $line == "10.000" ]]; then
         sort_keys+=("10.000")
-        display_values+=("$(printf '%-10s 10.000' "$char")")
+        if [[ -n $input_type ]]; then
+          display_values+=("$(printf '%-10s 10.000 %1s' "$char" "$type")")
+        else
+          display_values+=("$(printf '%-10s 10.000' "$char")")
+        fi
       else
         # Keep the raw value with three decimal places
         sort_keys+=("$line")
-        display_values+=("$(printf '%-10s %6.3f' "$char" "$line")")
+        if [[ -n $input_type ]]; then
+          display_values+=("$(printf '%-10s %6.3f %1s' "$char" "$line" "$type")")
+        else
+          display_values+=("$(printf '%-10s %6.3f' "$char" "$line")")
+        fi
       fi
     fi
     ((i++))
   done < <(jq ".[].val" <<<"$val")
+  
+  # echo "DEBUG: Processed ${#display_values[@]} display values"
 
   # Sort the indices based on the sort keys
   local sorted_indices=()
@@ -402,8 +485,13 @@ makeEasyRanking() {
     sorted_display+=("${display_values[$idx]}")
   done < <(printf '%s\n' "${sorted_indices[@]}" | sort -nr -k2,2)
 
-  # Display in 3 columns
-  local cols=3
+  # Display in 4 columns when input type is specified, otherwise 3 columns
+  local cols
+  if [[ -n $input_type ]]; then
+    cols=4
+  else
+    cols=3
+  fi
   local total=${#sorted_display[@]}
   local rows=$(( (total + cols - 1) / cols ))  # Ceiling division
   
@@ -415,28 +503,61 @@ makeEasyRanking() {
       local idx=$((row + col*rows))
       if (( idx < total )); then
         local entry="${sorted_display[idx]}"
+        # echo "DEBUG: Entry: $entry"
         local char=${entry%% *}
-        local value=${entry#* }
+        local rest=${entry#* }
         
         printf '%2d) ' $((idx+1))
         print_color "$BOLD" "$char"  # Removed WHITE color
         printf ' '
         
-        # Handle self-matches without color
-        if [[ $value == "--" ]]; then
-          printf '%s' "$value"
-        else
-          # Use awk for floating-point comparison with multiple thresholds
-          if awk -v val="$value" 'BEGIN { exit !(val >= 5.5) }'; then
-            print_color "$GREEN" "$value"
-          elif awk -v val="$value" 'BEGIN { exit !(val >= 5.2) }'; then
-            print_color "$LIGHT_GREEN" "$value"
-          elif awk -v val="$value" 'BEGIN { exit !(val >= 4.8) }'; then
-            print_color "$YELLOW" "$value"  # Use yellow for middle range
-          elif awk -v val="$value" 'BEGIN { exit !(val >= 4.5) }'; then
-            print_color "$LIGHT_RED" "$value"
+        if [[ -n $input_type ]]; then
+          # Format with input type: "char 5.123 C" or "char -- C"
+          # Split rest into value and type
+          local parts=($rest)
+          local value=${parts[0]}
+          local type=${parts[1]}
+          
+          # echo "DEBUG: Value: $value, Type: $type"
+          
+          # Handle self-matches without color
+          if [[ $value == "--" ]]; then
+            printf '%s %s' "$value" "$type"
           else
-            print_color "$RED" "$value"
+            # Use awk for floating-point comparison with multiple thresholds
+            if awk -v val="$value" 'BEGIN { exit !(val >= 5.5) }'; then
+              print_color "$GREEN" "$value"
+            elif awk -v val="$value" 'BEGIN { exit !(val >= 5.2) }'; then
+              print_color "$LIGHT_GREEN" "$value"
+            elif awk -v val="$value" 'BEGIN { exit !(val >= 4.8) }'; then
+              print_color "$YELLOW" "$value"  # Use yellow for middle range
+            elif awk -v val="$value" 'BEGIN { exit !(val >= 4.5) }'; then
+              print_color "$LIGHT_RED" "$value"
+            else
+              print_color "$RED" "$value"
+            fi
+            printf ' %s' "$type"
+          fi
+        else
+          # Format without input type: "char 5.123" or "char --"
+          local value=$rest
+          
+          # Handle self-matches without color
+          if [[ $value == "--" ]]; then
+            printf '%s' "$value"
+          else
+            # Use awk for floating-point comparison with multiple thresholds
+            if awk -v val="$value" 'BEGIN { exit !(val >= 5.5) }'; then
+              print_color "$GREEN" "$value"
+            elif awk -v val="$value" 'BEGIN { exit !(val >= 5.2) }'; then
+              print_color "$LIGHT_GREEN" "$value"
+            elif awk -v val="$value" 'BEGIN { exit !(val >= 4.8) }'; then
+              print_color "$YELLOW" "$value"  # Use yellow for middle range
+            elif awk -v val="$value" 'BEGIN { exit !(val >= 4.5) }'; then
+              print_color "$LIGHT_RED" "$value"
+            else
+              print_color "$RED" "$value"
+            fi
           fi
         fi
         printf '  '
@@ -449,21 +570,13 @@ charaExists() {
   local char_name=$character
   local char_type=$input_type
   
-  if [[ -n $input_type ]]; then
-    # For input-specific mode, check for match with type prefix
-    for e in "${ranking[@]%% *}"; do 
-      if [[ $e =~ ^$char_type-$char_name$ ]]; then
-        return 0
-      fi
-    done
-  else
-    # For consolidated mode, check for match with character name
-    for e in "${ranking[@]%% *}"; do 
-      if [[ $e == "$char_name" ]]; then
-        return 0
-      fi
-    done
-  fi
+  # For both modes, just check if the character name exists in the ranking
+  for e in "${ranking[@]%% *}"; do 
+    if [[ $e == "$char_name" ]]; then
+      return 0
+    fi
+  done
+  
   return 1
 }
 
